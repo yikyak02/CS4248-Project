@@ -1,8 +1,22 @@
-import json, csv, argparse
-from transformers import BertTokenizerFast
+import json, argparse
+import os
+import yaml
+from transformers import AutoTokenizer
 from datasets import Dataset, DatasetDict
 
-tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
+CFG_PATH = "config/deberta_base_pointer.yaml"
+if not os.path.exists(CFG_PATH):
+    raise FileNotFoundError(f"Config not found at {CFG_PATH}. Create it first.")
+
+with open(CFG_PATH, "r") as f:
+    CFG = yaml.safe_load(f)
+
+ENCODER_NAME = CFG.get("encoder_name", "microsoft/deberta-v3-base")
+MAX_LENGTH = int(CFG.get("max_length", 384))
+DOC_STRIDE = int(CFG.get("doc_stride", 128))
+
+# Initialize tokenizer from config
+tokenizer = AutoTokenizer.from_pretrained(ENCODER_NAME, use_fast=True)
 
 #Read SQuAD-style JSON data
 def read_data(file_path):
@@ -122,38 +136,51 @@ def check_lengths(data):
 
 #sample test run
 def main():
-    file_path = "C:\\Users\\zonli\\Downloads\\train-v1.1.json"
-
-    print("Reading dataset...")
-    examples = read_data(file_path)
-    print(f"Loaded {len(examples)} QA pairs.")
-
-    print("Tokenizing and aligning answers...")
-    final_data = Finalize_data(examples)
-
-    check_lengths(final_data)
-
-    print("\nSample output (first window feature):")
-    for i in range(5):
-        sample = final_data[i]
-        print(f"ID: {sample['id']}")
-        print(f"Question: {examples[i]['question']}")
-        # Show up to first two answers that fit this window
-        if sample["answers"]:
-            for j, ans in enumerate(sample["answers"][:2]):
-                print(f"Answer {j+1} text: {ans['answer_text']}")
-                print(f"  Start token index: {ans['start_token_index']}, End token index: {ans['end_token_index']}")
-        else:
-            print("No gold answers lie inside this window (answers list is empty).")
+    parser = argparse.ArgumentParser(description='Process SQuAD dataset for BERT training')
+    parser.add_argument('--input_file', type=str, 
+                       default='data/dev-v1.1.json',
+                       help='Path to the SQuAD JSON file (default: data/train-v1.1.json)')
+    parser.add_argument('--output_dir', type=str, default='data/processed_dataset',
+                       help='Directory to save processed dataset (default: data/processed_dataset)')
     
-    print(f"First 20 tokens: {tokenizer.convert_ids_to_tokens(sample['input_ids'][:20])}")
+    args = parser.parse_args()
     
-    dataset_path = "processed_dataset"
-    print(f"\nSaving processed dataset to {dataset_path}...")
-    save_to_dataset(final_data, dataset_path)
-    print("Loading dataset from disk...")
-    loaded_dataset = load_from_dataset(dataset_path)
+    try:
+        print("Reading dataset...")
+        examples = read_data(args.input_file)
+        print(f"Loaded {len(examples)} QA pairs.")
 
+        print("Tokenizing and aligning answers...")
+        final_data = Finalize_data(examples)
+
+        check_lengths(final_data)
+
+        print("\nSample output (first window feature):")
+        for i in range(5):
+            sample = final_data[i]
+            print(f"ID: {sample['id']}")
+            print(f"Question: {examples[i]['question']}")
+            # Show up to first two answers that fit this window
+            if sample["answers"]:
+                for j, ans in enumerate(sample["answers"][:2]):
+                    print(f"Answer {j+1} text: {ans['answer_text']}")
+                    print(f"  Start token index: {ans['start_token_index']}, End token index: {ans['end_token_index']}")
+            else:
+                print("No gold answers lie inside this window (answers list is empty).")
+        
+        print(f"First 20 tokens: {tokenizer.convert_ids_to_tokens(sample['input_ids'][:20])}")
+        
+        print(f"\nSaving processed dataset to {args.output_dir}...")
+        save_to_dataset(final_data, args.output_dir)
+        print("Loading dataset from disk...")
+        loaded_dataset = load_from_dataset(args.output_dir)
+        
+    except FileNotFoundError:
+        print(f"Error: File '{args.input_file}' not found. Please check the file path.")
+        print("Make sure the SQuAD dataset file is in the ../data/ folder")
+        print("Usage example: python data_processing.py --input_file ../data/train-v1.1.json")
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,36 @@
+seed: 42
+processed_dir: data/processed_dataset
+
+# Backbone (same family, smaller)
+encoder_name: microsoft/deberta-v3-small
+
+# Windowing used by preprocessing + predict
+max_length: 256
+doc_stride: 80
+max_answer_len: 30
+
+# Head (unchanged logic)
+head_type: pointer
+topk_start: 5
+
+# Training (light but realistic)
+epochs: 2
+train_batch_size: 16         # adjust if GPU RAM is small
+grad_accum_steps: 1
+lr: 3e-5
+weight_decay: 0.01
+warmup_ratio: 0.06
+max_grad_norm: 1.0
+amp: true                    # will auto-disable on MPS/CPU below
+
+label_smoothing: 0.05
+ema: false                   # keep off for speed
+ema_decay: 0.999
+
+# IO / logging
+output_dir: outputs/deberta_v3_small_pointer
+log_interval: 50
+save_every_steps: 0
+
+# Dataloader
+num_workers: 0               # safe on macOS; increase on Linux if desired
