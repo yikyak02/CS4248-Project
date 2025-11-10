@@ -22,7 +22,7 @@ if SRC_DIR not in sys.path:
 from data_wrappers import SquadWindowDataset, qa_collate
 from models.qa_model import QASpanProposer
 from utils.seed import set_seed
-from utils.schedule import build_linear_warmup
+from utils.schedule import build_linear_warmup, build_cosine_warmup
 from utils.logging import CSVLogger, ensure_dir
 from utils.ema import EMA
 
@@ -32,6 +32,25 @@ def load_processed_split(path: str, split: str = "train"):
     if split not in ds:
         raise ValueError(f"Expected a '{split}' split in {path}")
     return ds[split]
+
+
+@torch.no_grad()
+def validate(model, loader, device, amp, amp_device):
+    """Compute average validation loss"""
+    model.eval()
+    total_loss = 0.0
+    num_batches = 0
+    
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        ctx = torch.amp.autocast(device_type=amp_device, enabled=amp) if amp else nullcontext()
+        with ctx:
+            out = model(**batch)
+            total_loss += out["loss"].item()
+        num_batches += 1
+    
+    model.train()
+    return total_loss / max(1, num_batches)
 
 
 def compute_total_steps(num_examples: int, batch_size: int, epochs: int, grad_accum: int) -> int:
@@ -80,6 +99,7 @@ def main(cfg_path: str):
     # robust type-casting (tolerates quoted yaml values)
     seed            = int(cfg.get("seed", 42))
     processed_dir   = cfg["processed_dir"]
+    val_processed_dir = cfg.get("val_processed_dir")  # optional validation data
     encoder_name    = cfg["encoder_name"]
     head_type       = cfg.get("head_type", "pointer")
     topk_start      = int(cfg.get("topk_start", 5))
@@ -94,8 +114,16 @@ def main(cfg_path: str):
     max_grad_norm   = float(cfg.get("max_grad_norm", 1.0))
     amp_cfg         = bool(cfg.get("amp", True))
     label_smooth    = float(cfg.get("label_smoothing", 0.0))
+    dropout         = float(cfg.get("dropout", 0.1))
     use_ema         = bool(cfg.get("ema", False))
     ema_decay       = float(cfg.get("ema_decay", 0.999))
+    scheduler_type  = cfg.get("scheduler", "linear")  # "linear" or "cosine"
+    
+    # Early stopping parameters
+    use_early_stop  = bool(cfg.get("early_stopping", False))
+    patience        = int(cfg.get("patience", 3))
+    val_interval    = int(cfg.get("val_interval", 1))  # validate every N epochs
+    
     # robust int parsing for num_workers
     _nw = cfg.get("num_workers", 0)
     try:
@@ -116,7 +144,8 @@ def main(cfg_path: str):
         amp = bool(amp_cfg)
         amp_device = "cuda"
         try:
-            torch.set_float32_matmul_precision("high")
+            torch.backends.cuda.matmul.fp32_precision = 'high'
+            torch.backends.cudnn.conv.fp32_precision = 'high'
         except Exception:
             pass
     elif torch.backends.mps.is_available():
@@ -145,13 +174,30 @@ def main(cfg_path: str):
         collate_fn=qa_collate,
     )
 
+    # Load validation data if provided
+    val_loader = None
+    if val_processed_dir:
+        print(f"[data] loading validation from {val_processed_dir}")
+        val_hf = load_processed_split(val_processed_dir, split="train")  # val data stored as "train" split
+        val_ds = SquadWindowDataset(val_hf, cls_token_id=tokenizer.cls_token_id or 0)
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=train_bs * 2,  # larger batch for inference
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+            collate_fn=qa_collate,
+        )
+        print(f"[data] validation set: {len(val_ds)} windows")
+
     # ------------------ model -------------------
     model = QASpanProposer(
         encoder_name=encoder_name,
-        head_type=head_type,          # "pointer" | "biaffine"
+        head_type=head_type,
         topk_start=topk_start,
         max_answer_len=max_answer_len,
         label_smoothing=label_smooth,
+        dropout=dropout,
     ).to(device)
 
     # ---------------- optim/sched ---------------
@@ -163,10 +209,15 @@ def main(cfg_path: str):
         grad_accum=grad_accum,
     )
     warmup_steps = int(warmup_ratio * total_steps)
-    sched = build_linear_warmup(opt, warmup_steps, total_steps)
+    
+    # Choose scheduler based on config
+    if scheduler_type == "cosine":
+        sched = build_cosine_warmup(opt, warmup_steps, total_steps)
+    else:
+        sched = build_linear_warmup(opt, warmup_steps, total_steps)
 
     # GradScaler only for CUDA AMP
-    scaler = torch.amp.GradScaler(device_type="cuda") if (amp and device.type == "cuda") else None
+    scaler = torch.amp.GradScaler('cuda') if (amp and device.type == "cuda") else None
 
     # ------------------ EMA (opt) ---------------
     ema = EMA(model, decay=ema_decay) if use_ema else None
@@ -175,10 +226,18 @@ def main(cfg_path: str):
     ensure_dir(out_dir)
     logger = CSVLogger(os.path.join(out_dir, "metrics_train.csv"))
 
+    # ---------------- early stopping ------------
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_checkpoint_dir = os.path.join(out_dir, "best")
+
     # ---------------- train loop ----------------
     model.train()
     step = 0
     for epoch in range(1, epochs + 1):
+        epoch_loss = 0.0
+        num_batches = 0
+        
         for batch in train_loader:
             batch = {k: v.to(device) for k, v in batch.items()}
 
@@ -204,10 +263,8 @@ def main(cfg_path: str):
                 if ema is not None:
                     ema.update(model)
 
-            if step % log_interval == 0:
-                lr_now = sched.get_last_lr()[0]
-                logger.log({"step": step, "epoch": epoch, "loss": float(loss.item() * max(1, grad_accum)), "lr": lr_now})
-                print(f"[train] epoch {epoch} step {step} | loss {loss.item() * max(1, grad_accum):.4f} | lr {lr_now:.6f}")
+            epoch_loss += loss.item() * max(1, grad_accum)
+            num_batches += 1
 
             if save_every and step > 0 and step % save_every == 0:
                 if ema is not None:
@@ -219,6 +276,41 @@ def main(cfg_path: str):
                     save_checkpoint(os.path.join(out_dir, f"step{step}"), model, tokenizer)
 
             step += 1
+
+        # Log epoch metrics
+        avg_epoch_loss = epoch_loss / max(1, num_batches)
+        lr_now = sched.get_last_lr()[0]
+        logger.log({"epoch": epoch, "train_loss": avg_epoch_loss, "lr": lr_now})
+        print(f"[train] epoch {epoch} | loss {avg_epoch_loss:.4f} | lr {lr_now:.6f}")
+
+        # per-epoch validation (if enabled)
+        if val_loader is not None and epoch % val_interval == 0:
+            val_loss = validate(model, val_loader, device, amp, amp_device)
+            logger.log({"epoch": epoch, "val_loss": val_loss})
+            print(f"[val] epoch {epoch} | val_loss {val_loss:.4f}")
+            
+            # Early stopping logic
+            if use_early_stop:
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    epochs_no_improve = 0
+                    # Save best checkpoint
+                    print(f"[early_stop] New best validation loss: {val_loss:.4f}")
+                    if ema is not None:
+                        to_save = model.module if hasattr(model, "module") else model
+                        ema.store(to_save); ema.copy_to(to_save)
+                        save_checkpoint(best_checkpoint_dir, model, tokenizer)
+                        ema.restore(to_save)
+                    else:
+                        save_checkpoint(best_checkpoint_dir, model, tokenizer)
+                else:
+                    epochs_no_improve += 1
+                    print(f"[early_stop] No improvement for {epochs_no_improve}/{patience} epochs")
+                    
+                    if epochs_no_improve >= patience:
+                        print(f"[early_stop] Stopping training at epoch {epoch}")
+                        print(f"[early_stop] Best validation loss: {best_val_loss:.4f}")
+                        return  # Exit training early
 
         # per-epoch save
         if ema is not None:

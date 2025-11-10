@@ -14,7 +14,7 @@ class QASpanProposer(nn.Module):
     """
     def __init__(self, encoder_name: str, head_type: str = "pointer",
                  topk_start: int = 5, max_answer_len: int = 30,
-                 label_smoothing: float = 0.0):
+                 label_smoothing: float = 0.0, dropout: float = 0.1):
         super().__init__()
         self.encoder = HFEncoder(encoder_name)
         self.config = self.encoder.config
@@ -25,9 +25,9 @@ class QASpanProposer(nn.Module):
         self.max_answer_len = int(max_answer_len)
 
         if head_type == "pointer":
-            self.head = ConditionalPointerHead(hidden_size=hidden, topk_start=topk_start)
+            self.head = ConditionalPointerHead(hidden_size=hidden, topk_start=topk_start, dropout=dropout)
         elif head_type == "biaffine":
-            self.head = BiaffineSpanHead(hidden_size=hidden, max_answer_len=max_answer_len)
+            self.head = BiaffineSpanHead(hidden_size=hidden, max_answer_len=max_answer_len, dropout=dropout)
         else:
             raise ValueError(f"Unknown head_type: {head_type}")
 

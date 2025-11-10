@@ -11,9 +11,10 @@ class ConditionalPointerHead(nn.Module):
     Conditional pointer: predict start logits, then predict end logits conditioned
     on top-K start positions via attention.
     """
-    def __init__(self, hidden_size: int, topk_start: int = 5):
+    def __init__(self, hidden_size: int, topk_start: int = 5, dropout: float = 0.1):
         super().__init__()
         self.topk = topk_start
+        self.dropout = nn.Dropout(dropout)
         self.start_proj = nn.Linear(hidden_size, 1)
 
         self.end_q = nn.Linear(hidden_size, hidden_size)
@@ -34,6 +35,9 @@ class ConditionalPointerHead(nn.Module):
 
     def forward(self, H: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         B, L, d = H.shape
+        
+        # Apply dropout to encoder outputs
+        H = self.dropout(H)
 
         # Start logits
         start_logits = self.start_proj(H).squeeze(-1)  # [B, L]
@@ -75,15 +79,20 @@ class BiaffineSpanHead(nn.Module):
     Jointly scores spans (start i, end j) by scoring (i, offset=j-i) within a max length band.
     Returns span scores tensor [B, L, max_answer_len].
     """
-    def __init__(self, hidden_size: int, max_answer_len: int = 30):
+    def __init__(self, hidden_size: int, max_answer_len: int = 30, dropout: float = 0.1):
         super().__init__()
         self.max_answer_len = max_answer_len
+        self.dropout = nn.Dropout(dropout)
         self.U = nn.Parameter(torch.empty(hidden_size, hidden_size))
         nn.init.xavier_uniform_(self.U)
         self.proj = nn.Linear(2 * hidden_size, 1)  # boundary features
 
     def forward(self, H: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         B, L, d = H.size()
+        
+        # Apply dropout
+        H = self.dropout(H)
+        
         Hu = torch.matmul(H, self.U)  # [B, L, d]
         scores = H.new_full((B, L, self.max_answer_len), fill_value=MASK_VAL)
 
