@@ -1,36 +1,84 @@
+# ==============================================================================
+# Project Configuration
+# ==============================================================================
+
+# Data paths
+processed_dir: data/processed_dataset     # Training data (preprocessed)
+val_processed_dir: data/processed_dev     # Validation data (preprocessed)
+
+# Random seed for reproducibility
 seed: 42
-processed_dir: data/processed_dataset
 
-# Backbone (same family, smaller)
-encoder_name: microsoft/deberta-v3-small
+# ==============================================================================
+# Model Architecture
+# ==============================================================================
 
-# Windowing used by preprocessing + predict (smaller = faster)
-max_length: 192
-doc_stride: 64
-max_answer_len: 30
+# Encoder: Pre-trained transformer model
+encoder_name: microsoft/deberta-v3-large
 
-# Head (unchanged logic)
+# QA Head: Type of span extraction head
+# Options: 'pointer' (conditional pointer network) or 'biaffine' (biaffine attention)
 head_type: pointer
-topk_start: 5
 
-# Training (faster, resource-friendly)
-epochs: 1
-train_batch_size: 8          # reduce on MPS/CPU for speed
-grad_accum_steps: 1
-lr: 3e-5
-weight_decay: 0.01
-warmup_ratio: 0.06
-max_grad_norm: 1.0
-amp: true                    # only engages on CUDA
+# Pointer head specific settings
+topk_start: 10                            # Number of top start candidates for conditional end prediction
 
-label_smoothing: 0.0
-ema: false                   # keep off for speed
-ema_decay: 0.999
+# Biaffine head specific settings  
+max_answer_len: 30                        # Maximum answer length in tokens (ignored by pointer head)
 
-# IO / logging
-output_dir: outputs/deberta_v3_small_pointer_fast
-log_interval: 25
-save_every_steps: 0
+# ==============================================================================
+# Data Processing / Windowing Parameters
+# ==============================================================================
 
-# Dataloader
-num_workers: 0               # safe on macOS; increase on Linux if desired
+max_length: 384                           # Maximum sequence length for sliding windows
+doc_stride: 128                           # Stride for sliding windows (overlap = max_length - doc_stride)
+
+# ==============================================================================
+# Training Hyperparameters
+# ==============================================================================
+
+epochs: 3
+train_batch_size: 8
+grad_accum_steps: 4                       # Effective batch size = train_batch_size * grad_accum_steps = 32
+
+# Optimizer settings
+lr: 3e-5                                  # Learning rate (Adam)
+weight_decay: 0.01                        # L2 regularization
+warmup_ratio: 0.1                         # Fraction of steps for learning rate warmup
+max_grad_norm: 1.0                        # Gradient clipping threshold
+
+# Regularization
+dropout: 0.1                              # Dropout probability in encoder and head
+label_smoothing: 0.0                      # Label smoothing factor (0.0 = no smoothing)
+
+# Learning rate schedule
+scheduler: linear                         # 'linear' or 'cosine'
+
+# Mixed precision training (faster on GPU)
+amp: true                                 # Automatic mixed precision (only on CUDA)
+
+# Exponential moving average (optional)
+ema: false                                # Use EMA of model weights
+ema_decay: 0.999                          # EMA decay factor
+
+# ==============================================================================
+# Early Stopping & Validation
+# ==============================================================================
+
+early_stopping: true                      # Stop training when validation stops improving
+patience: 3                               # Number of epochs without improvement before stopping
+val_interval: 1                           # Validate every N epochs
+
+# ==============================================================================
+# Logging & Checkpointing
+# ==============================================================================
+
+output_dir: outputs/deberta_large_pointer
+log_interval: 25                          # Log training metrics every N steps
+save_every_steps: 0                       # Save checkpoint every N steps (0 = only save best)
+
+# ==============================================================================
+# Data Loading
+# ==============================================================================
+
+num_workers: 4                            # Number of dataloader workers (adjust based on CPU cores)
