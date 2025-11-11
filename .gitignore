@@ -1,4 +1,6 @@
-data
+data/
+predictions/
+outputs/ 
 
 # Virtual environments
 .venv/

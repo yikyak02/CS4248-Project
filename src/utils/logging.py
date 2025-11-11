@@ -17,7 +17,7 @@ class CSVLogger:
         """
         self.filepath = filepath
         if fieldnames is None:
-            fieldnames = ["step", "epoch", "loss", "lr", "val_loss"]
+            fieldnames = ["epoch", "train_loss", "val_loss", "lr"]
         self.fieldnames = fieldnames
         
         if not os.path.exists(filepath):

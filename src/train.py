@@ -102,6 +102,7 @@ def main(cfg_path: str):
     val_processed_dir = cfg.get("val_processed_dir")  # optional validation data
     encoder_name    = cfg["encoder_name"]
     head_type       = cfg.get("head_type", "pointer")
+    model_name      = cfg.get("model_name")  # for huggingface head
     topk_start      = int(cfg.get("topk_start", 5))
     max_answer_len  = int(cfg.get("max_answer_len", 30))
 
@@ -191,6 +192,10 @@ def main(cfg_path: str):
         print(f"[data] validation set: {len(val_ds)} windows")
 
     # ------------------ model -------------------
+    model_kwargs = {}
+    if model_name:
+        model_kwargs["model_name"] = model_name
+    
     model = QASpanProposer(
         encoder_name=encoder_name,
         head_type=head_type,
@@ -198,6 +203,7 @@ def main(cfg_path: str):
         max_answer_len=max_answer_len,
         label_smoothing=label_smooth,
         dropout=dropout,
+        **model_kwargs
     ).to(device)
 
     # ---------------- optim/sched ---------------
@@ -280,37 +286,49 @@ def main(cfg_path: str):
         # Log epoch metrics
         avg_epoch_loss = epoch_loss / max(1, num_batches)
         lr_now = sched.get_last_lr()[0]
-        logger.log({"epoch": epoch, "train_loss": avg_epoch_loss, "lr": lr_now})
-        print(f"[train] epoch {epoch} | loss {avg_epoch_loss:.4f} | lr {lr_now:.6f}")
-
+        
         # per-epoch validation (if enabled)
+        val_loss = None
         if val_loader is not None and epoch % val_interval == 0:
             val_loss = validate(model, val_loader, device, amp, amp_device)
-            logger.log({"epoch": epoch, "val_loss": val_loss})
+        
+        # Log all metrics in one row
+        log_data = {
+            "epoch": epoch,
+            "train_loss": avg_epoch_loss,
+            "lr": lr_now
+        }
+        if val_loss is not None:
+            log_data["val_loss"] = val_loss
+        logger.log(log_data)
+        
+        # Print to console
+        print(f"[train] epoch {epoch} | loss {avg_epoch_loss:.4f} | lr {lr_now:.6f}")
+        if val_loss is not None:
             print(f"[val] epoch {epoch} | val_loss {val_loss:.4f}")
-            
-            # Early stopping logic
-            if use_early_stop:
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    epochs_no_improve = 0
-                    # Save best checkpoint
-                    print(f"[early_stop] New best validation loss: {val_loss:.4f}")
-                    if ema is not None:
-                        to_save = model.module if hasattr(model, "module") else model
-                        ema.store(to_save); ema.copy_to(to_save)
-                        save_checkpoint(best_checkpoint_dir, model, tokenizer)
-                        ema.restore(to_save)
-                    else:
-                        save_checkpoint(best_checkpoint_dir, model, tokenizer)
+        
+        # Early stopping logic (only if validation was run)
+        if val_loss is not None and use_early_stop:
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+                # Save best checkpoint
+                print(f"[early_stop] New best validation loss: {val_loss:.4f}")
+                if ema is not None:
+                    to_save = model.module if hasattr(model, "module") else model
+                    ema.store(to_save); ema.copy_to(to_save)
+                    save_checkpoint(best_checkpoint_dir, model, tokenizer)
+                    ema.restore(to_save)
                 else:
-                    epochs_no_improve += 1
-                    print(f"[early_stop] No improvement for {epochs_no_improve}/{patience} epochs")
-                    
-                    if epochs_no_improve >= patience:
-                        print(f"[early_stop] Stopping training at epoch {epoch}")
-                        print(f"[early_stop] Best validation loss: {best_val_loss:.4f}")
-                        return  # Exit training early
+                    save_checkpoint(best_checkpoint_dir, model, tokenizer)
+            else:
+                epochs_no_improve += 1
+                print(f"[early_stop] No improvement for {epochs_no_improve}/{patience} epochs")
+                
+                if epochs_no_improve >= patience:
+                    print(f"[early_stop] Stopping training at epoch {epoch}")
+                    print(f"[early_stop] Best validation loss: {best_val_loss:.4f}")
+                    return  # Exit training early
 
         # per-epoch save
         if ema is not None:
