@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Back-translation data augmentation for SQuAD dataset.
-Augments questions and contexts using MarianMT models.
+Optimized back-translation data augmentation for SQuAD dataset.
+Uses batching and faster generation for significant speedup.
 """
 
 import json
 import argparse
 import random
+import time
+import sys
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 import torch
@@ -16,76 +18,106 @@ from transformers import MarianMTModel, MarianTokenizer
 class BackTranslator:
     """Handles back-translation using Helsinki-NLP MarianMT models."""
     
-    def __init__(self, device="cpu"):
+    def __init__(self, device="cpu", batch_size=32):
         self.device = device
-        self.model_cache = {}  # Cache loaded models
+        self.batch_size = batch_size
+        self.model_cache = {}
         
-    def translate(self, text: str, src_lang: str, tgt_lang: str) -> str:
+    def translate_batch(self, texts: List[str], src_lang: str, tgt_lang: str) -> List[str]:
         """
-        Translate text from source language to target language.
+        Translate batch of texts (MUCH FASTER than one-by-one).
         
         Args:
-            text: Text to translate
-            src_lang: Source language code (e.g., "en")
-            tgt_lang: Target language code (e.g., "de")
+            texts: List of texts to translate
+            src_lang: Source language code
+            tgt_lang: Target language code
         
         Returns:
-            Translated text
+            List of translated texts
         """
         model_name = f'Helsinki-NLP/opus-mt-{src_lang}-{tgt_lang}'
         
         # Load model (or use cached)
         if model_name not in self.model_cache:
-            print(f"Loading model: {model_name}")
+            print(f"Loading model: {model_name}", flush=True)
+            t0 = time.time()
             tokenizer = MarianTokenizer.from_pretrained(model_name)
             model = MarianMTModel.from_pretrained(model_name).to(self.device)
+            model.eval()  # Set to eval mode
             self.model_cache[model_name] = (tokenizer, model)
+            print(f"   Loaded in {time.time()-t0:.1f}s", flush=True)
         else:
             tokenizer, model = self.model_cache[model_name]
         
-        # Translate
-        inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        # Process in batches
+        all_translations = []
+        num_batches = (len(texts) + self.batch_size - 1) // self.batch_size
+        print(f"   Processing {len(texts):,} texts in {num_batches:,} batches (batch_size={self.batch_size})", flush=True)
         
-        with torch.no_grad():
-            # Use faster generation settings
-            translated = model.generate(**inputs, max_length=512, num_beams=1, do_sample=False)
+        for i in range(0, len(texts), self.batch_size):
+            batch_texts = texts[i:i + self.batch_size]
+            
+            # Tokenize batch
+            inputs = tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            
+            # Generate translations with optimized settings
+            with torch.no_grad():
+                translated = model.generate(
+                    **inputs,
+                    max_length=512,
+                    num_beams=1,           # Greedy decoding (fastest)
+                    do_sample=False,
+                    early_stopping=True,
+                    use_cache=True,        # Use KV cache
+                    num_return_sequences=1
+                )
+            
+            # Decode batch
+            batch_translations = tokenizer.batch_decode(translated, skip_special_tokens=True)
+            all_translations.extend(batch_translations)
+            
+            # Progress every 200 batches
+            if (i // self.batch_size + 1) % 200 == 0:
+                pct = (i + len(batch_texts)) / len(texts) * 100
+                print(f"   Progress: {pct:.1f}% ({i+len(batch_texts):,}/{len(texts):,})", flush=True)
         
-        result = tokenizer.decode(translated[0], skip_special_tokens=True)
-        return result
+        return all_translations
     
-    def back_translate(self, text: str, pivot_lang: str) -> str:
+    def back_translate_batch(
+        self,
+        texts: List[str],
+        pivot_lang: str
+    ) -> List[str]:
         """
-        Back-translate text through an intermediate language.
+        Back-translate batch of texts through intermediate language.
         
         Args:
-            text: Original English text
-            pivot_lang: Intermediate language code (e.g., "de", "fr", "es")
+            texts: List of English texts
+            pivot_lang: Intermediate language code
         
         Returns:
-            Back-translated English text
+            List of back-translated English texts
         """
+        print(f"   EN → {pivot_lang.upper()}", flush=True)
         # English → Pivot language
-        translated = self.translate(text, "en", pivot_lang)
+        translated = self.translate_batch(texts, "en", pivot_lang)
         
+        print(f"   {pivot_lang.upper()} → EN", flush=True)
         # Pivot language → English
-        back_translated = self.translate(translated, pivot_lang, "en")
+        back_translated = self.translate_batch(translated, pivot_lang, "en")
         
         return back_translated
 
 
 def find_answer_in_context(context: str, answer_text: str, original_start: int = None) -> Optional[Tuple[int, int]]:
-    """
-    Find answer text in context and return character positions.
-    
-    Args:
-        context: Context text to search in
-        answer_text: Answer text to find
-        original_start: Original start position (used to prefer closest match)
-    
-    Returns:
-        (start_pos, end_pos) or None if not found
-    """
+    """Find answer text in context and return character positions."""
     # Try exact match first
     pos = context.find(answer_text)
     if pos != -1:
@@ -97,89 +129,9 @@ def find_answer_in_context(context: str, answer_text: str, original_start: int =
     pos = lower_context.find(lower_answer)
     
     if pos != -1:
-        # Extract actual text from context (preserves casing)
-        actual_text = context[pos:pos + len(answer_text)]
         return (pos, pos + len(answer_text))
     
-    # Try finding all occurrences if multiple exist
-    all_positions = []
-    start = 0
-    while True:
-        pos = context.find(answer_text, start)
-        if pos == -1:
-            break
-        all_positions.append((pos, pos + len(answer_text)))
-        start = pos + 1
-    
-    if all_positions:
-        # If original position provided, choose closest
-        if original_start is not None:
-            closest = min(all_positions, key=lambda p: abs(p[0] - original_start))
-            return closest
-        return all_positions[0]
-    
     return None
-
-
-def augment_qa_example(
-    qa: Dict,
-    context: str,
-    translator: BackTranslator,
-    pivot_lang: str
-) -> Optional[Dict]:
-    """
-    Augment a single QA example using back-translation.
-    
-    Args:
-        qa: QA dict with "id", "question", "answers"
-        context: Paragraph context
-        translator: BackTranslator instance
-        pivot_lang: Intermediate language for back-translation
-    
-    Returns:
-        Augmented QA dict or None if answer not found
-    """
-    try:
-        # Back-translate question and context
-        bt_question = translator.back_translate(qa["question"], pivot_lang)
-        bt_context = translator.back_translate(context, pivot_lang)
-        
-        # Process each answer
-        original_answer = qa["answers"][0]  # Use first answer
-        answer_text = original_answer["text"]
-        original_start = original_answer["answer_start"]
-        
-        # Find answer in back-translated context
-        new_positions = find_answer_in_context(bt_context, answer_text, original_start)
-        
-        if new_positions is None:
-            # Answer not found - skip this augmentation
-            return None
-        
-        new_start, new_end = new_positions
-        
-        # Verify extraction
-        extracted = bt_context[new_start:new_end]
-        if extracted.lower() != answer_text.lower():
-            # Mismatch - skip
-            return None
-        
-        # Create augmented QA
-        augmented_qa = {
-            "id": f"{qa['id']}_aug_{pivot_lang}",
-            "question": bt_question,
-            "answers": [{
-                "text": extracted,  # Use extracted text (preserves casing)
-                "answer_start": new_start
-            }],
-            "is_impossible": qa.get("is_impossible", False)
-        }
-        
-        return augmented_qa, bt_context
-        
-    except Exception as e:
-        print(f"⚠️  Error augmenting {qa['id']}: {e}")
-        return None
 
 
 def augment_squad_dataset(
@@ -187,10 +139,11 @@ def augment_squad_dataset(
     output_path: str,
     pivot_languages: List[str] = ["de", "fr", "es"],
     max_examples: int = 100,
-    device: str = "cpu"
+    device: str = "cpu",
+    batch_size: int = 32
 ):
     """
-    Augment SQuAD dataset with back-translation.
+    Augment SQuAD dataset with back-translation (optimized with batching).
     
     Args:
         input_path: Path to input SQuAD JSON
@@ -198,20 +151,36 @@ def augment_squad_dataset(
         pivot_languages: List of intermediate languages
         max_examples: Maximum examples to augment (per language)
         device: Device for models ("cpu", "cuda", "mps")
+        batch_size: Batch size for translation (larger = faster)
     """
-    print(f"🚀 Starting back-translation augmentation")
-    print(f"   Input: {input_path}")
-    print(f"   Output: {output_path}")
-    print(f"   Languages: {pivot_languages}")
-    print(f"   Max examples per language: {max_examples}")
-    print(f"   Device: {device}")
+    print("=" * 70, flush=True)
+    print("BACK-TRANSLATION DATA AUGMENTATION", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Input file: {input_path}", flush=True)
+    print(f"Output file: {output_path}", flush=True)
+    print(f"Pivot languages: {pivot_languages}", flush=True)
+    print(f"Max examples per language: {max_examples:,}", flush=True)
+    print(f"Device: {device}", flush=True)
+    print(f"Batch size: {batch_size}", flush=True)
+    print("=" * 70, flush=True)
+    sys.stdout.flush()
     
     # Load original data
-    with open(input_path, 'r') as f:
-        squad_data = json.load(f)
+    print(f"\nLoading data from {input_path}...", flush=True)
+    t_load = time.time()
     
-    # Initialize translator
-    translator = BackTranslator(device=device)
+    try:
+        with open(input_path, 'r') as f:
+            squad_data = json.load(f)
+        print(f"Loaded {len(squad_data['data']):,} articles in {time.time()-t_load:.1f}s", flush=True)
+    except Exception as e:
+        print(f"ERROR loading file: {e}", flush=True)
+        raise
+    
+    # Initialize translator with batching
+    print(f"Initializing translator...", flush=True)
+    sys.stdout.flush()
+    translator = BackTranslator(device=device, batch_size=batch_size)
     
     # Statistics
     stats = {
@@ -221,7 +190,9 @@ def augment_squad_dataset(
         "by_language": {lang: {"success": 0, "filtered": 0} for lang in pivot_languages}
     }
     
-    # Collect all QA pairs first
+    # Collect all QA pairs
+    print(f"Collecting QA pairs...", flush=True)
+    t_collect = time.time()
     all_qa_pairs = []
     for article in squad_data["data"]:
         for para in article["paragraphs"]:
@@ -233,12 +204,19 @@ def augment_squad_dataset(
                 })
                 stats["original_questions"] += 1
     
+    print(f"Collected {len(all_qa_pairs):,} QA pairs in {time.time()-t_collect:.1f}s", flush=True)
+    
     # Sample subset for augmentation
     total_to_augment = min(max_examples, len(all_qa_pairs))
+    print(f"Sampling {total_to_augment:,} examples...", flush=True)
     sampled_qa_pairs = random.sample(all_qa_pairs, total_to_augment)
     
-    print(f"\n📊 Total questions in dataset: {len(all_qa_pairs)}")
-    print(f"   Augmenting {total_to_augment} questions per language")
+    print(f"\nDataset Summary:", flush=True)
+    print(f"   Total questions: {len(all_qa_pairs):,}", flush=True)
+    print(f"   Augmenting: {total_to_augment:,} per language", flush=True)
+    print(f"   Languages: {len(pivot_languages)}", flush=True)
+    print(f"   Expected new examples: {total_to_augment * len(pivot_languages):,}", flush=True)
+    sys.stdout.flush()
     
     # Create augmented data structure
     augmented_data = {
@@ -246,28 +224,83 @@ def augment_squad_dataset(
         "data": []
     }
     
-    # Group by article and paragraph for output structure
-    # For simplicity, create a new article for augmented data
-    for lang in pivot_languages:
-        print(f"\n🔄 Processing language: {lang.upper()}")
+    # Process each language
+    for lang_idx, lang in enumerate(pivot_languages):
+        print(f"\n{'='*70}", flush=True)
+        print(f"Language {lang_idx+1}/{len(pivot_languages)}: {lang.upper()}", flush=True)
+        print(f"{'='*70}", flush=True)
+        sys.stdout.flush()
         
+        t_lang = time.time()
+        
+        # Extract questions and contexts
+        print(f"Extracting texts...", flush=True)
+        questions = [item["qa"]["question"] for item in sampled_qa_pairs]
+        contexts = [item["context"] for item in sampled_qa_pairs]
+        print(f"   Questions: {len(questions):,}", flush=True)
+        print(f"   Contexts: {len(contexts):,}", flush=True)
+        sys.stdout.flush()
+        
+        # Batch back-translate questions
+        print(f"\nBack-translating questions through {lang.upper()}...", flush=True)
+        sys.stdout.flush()
+        bt_questions = translator.back_translate_batch(questions, lang)
+        
+        # Batch back-translate contexts
+        print(f"\nBack-translating contexts through {lang.upper()}...", flush=True)
+        sys.stdout.flush()
+        bt_contexts = translator.back_translate_batch(contexts, lang)
+        
+        # Create augmented examples
         augmented_article = {
             "title": f"Augmented_{lang.upper()}",
             "paragraphs": []
         }
         
-        for item in tqdm(sampled_qa_pairs, desc=f"Augmenting ({lang})"):
-            result = augment_qa_example(
-                qa=item["qa"],
-                context=item["context"],
-                translator=translator,
-                pivot_lang=lang
-            )
-            
-            if result is not None:
-                augmented_qa, bt_context = result
+        print(f"\nAligning answers...", flush=True)
+        sys.stdout.flush()
+        t_align = time.time()
+        
+        for i, item in enumerate(tqdm(sampled_qa_pairs, desc=f"Aligning ({lang})")):
+            try:
+                qa = item["qa"]
+                bt_question = bt_questions[i]
+                bt_context = bt_contexts[i]
                 
-                # Add to paragraph (create new paragraph for each QA for simplicity)
+                # Get original answer
+                original_answer = qa["answers"][0]
+                answer_text = original_answer["text"]
+                original_start = original_answer["answer_start"]
+                
+                # Find answer in back-translated context
+                new_positions = find_answer_in_context(bt_context, answer_text, original_start)
+                
+                if new_positions is None:
+                    stats["filtered_questions"] += 1
+                    stats["by_language"][lang]["filtered"] += 1
+                    continue
+                
+                new_start, new_end = new_positions
+                extracted = bt_context[new_start:new_end]
+                
+                # Verify extraction
+                if extracted.lower() != answer_text.lower():
+                    stats["filtered_questions"] += 1
+                    stats["by_language"][lang]["filtered"] += 1
+                    continue
+                
+                # Create augmented QA
+                augmented_qa = {
+                    "id": f"{qa['id']}_aug_{lang}",
+                    "question": bt_question,
+                    "answers": [{
+                        "text": extracted,
+                        "answer_start": new_start
+                    }],
+                    "is_impossible": qa.get("is_impossible", False)
+                }
+                
+                # Add to paragraphs
                 augmented_article["paragraphs"].append({
                     "context": bt_context,
                     "qas": [augmented_qa]
@@ -275,20 +308,46 @@ def augment_squad_dataset(
                 
                 stats["augmented_questions"] += 1
                 stats["by_language"][lang]["success"] += 1
-            else:
+                
+            except Exception as e:
+                print(f"Warning: Error at index {i}: {e}", flush=True)
                 stats["filtered_questions"] += 1
                 stats["by_language"][lang]["filtered"] += 1
         
         augmented_data["data"].append(augmented_article)
+        
+        # Language summary
+        elapsed = time.time() - t_lang
+        align_time = time.time() - t_align
+        success = stats['by_language'][lang]['success']
+        filtered = stats['by_language'][lang]['filtered']
+        
+        print(f"\n{lang.upper()} Complete!", flush=True)
+        print(f"   Total time: {elapsed:.1f}s", flush=True)
+        print(f"   Alignment time: {align_time:.1f}s", flush=True)
+        print(f"   Success: {success:,}", flush=True)
+        print(f"   Filtered: {filtered:,}", flush=True)
+        print(f"   Success rate: {success/(success+filtered)*100:.1f}%", flush=True)
+        sys.stdout.flush()
     
     # Add original data
+    print(f"\nAdding original {len(squad_data['data']):,} articles...", flush=True)
     augmented_data["data"].extend(squad_data["data"])
     
     # Save augmented dataset
+    print(f"\nSaving to {output_path}...", flush=True)
+    sys.stdout.flush()
+    t_save = time.time()
+    
     with open(output_path, 'w') as f:
         json.dump(augmented_data, f, indent=2)
     
-    # Print final statistics
+    print(f"Saved in {time.time()-t_save:.1f}s", flush=True)
+    
+    # Print statistics
+    total_qs = stats['original_questions'] + stats['augmented_questions']
+    mult_factor = total_qs / stats['original_questions']
+    
     print(f"""
 ╔════════════════════════════════════════════════════════════╗
 ║           AUGMENTATION COMPLETE                            ║
@@ -297,66 +356,47 @@ def augment_squad_dataset(
 ║ Augmented questions:     {stats['augmented_questions']:>6,}                         ║
 ║ Filtered out:            {stats['filtered_questions']:>6,}                         ║
 ╠════════════════════════════════════════════════════════════╣
-║ Total questions:         {stats['original_questions'] + stats['augmented_questions']:>6,}                         ║
-║ Multiplication factor:   {(stats['original_questions'] + stats['augmented_questions']) / stats['original_questions']:>6.2f}x                        ║
+║ Total questions:         {total_qs:>6,}                         ║
+║ Multiplication factor:   {mult_factor:>6.2f}x                        ║
 ╠════════════════════════════════════════════════════════════╣
 ║ By Language:                                               ║
-""")
+""", flush=True)
     
     for lang in pivot_languages:
         success = stats['by_language'][lang]['success']
         filtered = stats['by_language'][lang]['filtered']
         total = success + filtered
         success_rate = (success / total * 100) if total > 0 else 0
-        print(f"║   {lang.upper()}: {success:>4} success, {filtered:>4} filtered ({success_rate:>5.1f}% success) ║")
+        print(f"║   {lang.upper()}: {success:>5} success, {filtered:>5} filtered ({success_rate:>5.1f}% success) ║", flush=True)
     
     print(f"""╠════════════════════════════════════════════════════════════╣
 ║ Saved to: {output_path:<44} ║
 ╚════════════════════════════════════════════════════════════╝
-""")
+""", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Augment SQuAD dataset with back-translation")
-    parser.add_argument(
-        "--input",
-        type=str,
-        default="data/train-subset.json",
-        help="Input SQuAD JSON file"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="data/train-subset-augmented.json",
-        help="Output augmented JSON file"
-    )
-    parser.add_argument(
-        "--languages",
-        nargs="+",
-        default=["de", "fr", "es"],
-        help="Pivot languages for back-translation (e.g., de fr es)"
-    )
-    parser.add_argument(
-        "--max-examples",
-        type=int,
-        default=100,
-        help="Maximum examples to augment per language"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        choices=["cpu", "cuda", "mps"],
-        help="Device to run models on"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for sampling"
-    )
+    parser.add_argument("--input", type=str, required=True, help="Input SQuAD JSON file")
+    parser.add_argument("--output", type=str, required=True, help="Output augmented JSON file")
+    parser.add_argument("--languages", nargs="+", default=["de", "fr", "es"], help="Pivot languages")
+    parser.add_argument("--max-examples", type=int, default=100, help="Max examples per language")
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "mps"], help="Device")
+    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for translation")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     args = parser.parse_args()
+    
+    print(f"\n{'='*70}", flush=True)
+    print(f"Command-line arguments:", flush=True)
+    print(f"  --input: {args.input}", flush=True)
+    print(f"  --output: {args.output}", flush=True)
+    print(f"  --languages: {args.languages}", flush=True)
+    print(f"  --max-examples: {args.max_examples:,}", flush=True)
+    print(f"  --device: {args.device}", flush=True)
+    print(f"  --batch-size: {args.batch_size}", flush=True)
+    print(f"  --seed: {args.seed}", flush=True)
+    print(f"{'='*70}\n", flush=True)
     
     # Set random seed
     random.seed(args.seed)
@@ -368,11 +408,11 @@ def main():
         output_path=args.output,
         pivot_languages=args.languages,
         max_examples=args.max_examples,
-        device=args.device
+        device=args.device,
+        batch_size=args.batch_size
     )
     
-    print("\n✅ Done! You can now preprocess the augmented dataset:")
-    print(f"   python src/data_processing.py --input_file {args.output} --output_dir data/processed_augmented")
+    print(f"\nALL DONE!", flush=True)
 
 
 if __name__ == "__main__":

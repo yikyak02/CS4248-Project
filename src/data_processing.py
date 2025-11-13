@@ -55,7 +55,7 @@ def tokenize(question, context):
         return_overflowing_tokens=True,
         max_length=MAX_LENGTH,
         stride=DOC_STRIDE,
-        truncation="only_second",
+        truncation=True,  # Changed from "only_second" to handle edge cases
         padding="max_length",
     )
     return encoding
@@ -86,10 +86,19 @@ def find_answer_positions(tokenized_input, answer_start, answer_end, window_inde
 #Convert data into format suitable for BERT training
 def Finalize_data(input):
     final_data = []
-    for data in input:
+    skipped = 0
+    
+    for idx, data in enumerate(input):
         question = data["question"] 
         context = data["context"]
-        tokenized_test_input = tokenize(question, context)
+        
+        try:
+            tokenized_test_input = tokenize(question, context)
+        except Exception as e:
+            print(f"WARNING: Skipping example {idx} (ID: {data['id']}): Tokenization failed - {e}")
+            skipped += 1
+            continue
+        
         has_tti = "token_type_ids" in tokenized_test_input
         answers = data["answers"]
         #Store all answer positions(for multiple answers) can be chosen randomly during training    
@@ -121,6 +130,10 @@ def Finalize_data(input):
             if has_tti:
                 item["token_type_ids"] = tokenized_test_input["token_type_ids"][i]
             final_data.append(item)
+    
+    if skipped > 0:
+        print(f"\nWARNING: Skipped {skipped} examples due to tokenization errors")
+        print(f"Successfully processed {len(input) - skipped} examples")
 
     return final_data
 

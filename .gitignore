@@ -1,6 +1,5 @@
 # Data - ignore processed, keep original
-data/processed_dataset/
-data/processed_dev/
+data/
 !data/dev-v1.1.json
 !data/train-v1.1.json
 
