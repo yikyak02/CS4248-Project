@@ -193,8 +193,10 @@ def main():
                     help="Folder that contains fine-tuned encoder (save_pretrained) and qa_head.pt")
     ap.add_argument("--dev_json", type=str, required=True)
     ap.add_argument("--output", type=str, default="predictions.json")
-    ap.add_argument("--max_length", type=int, default=384)
-    ap.add_argument("--stride", type=int, default=128)
+    ap.add_argument("--max_length", type=int, default=384, 
+                    help="Must match training value (default: 384)")
+    ap.add_argument("--stride", type=int, default=128,
+                    help="Must match training doc_stride (default: 128)")
     ap.add_argument("--topk_start", type=int, default=20)
     ap.add_argument("--topk_end", type=int, default=20)
     ap.add_argument("--max_answer_len", type=int, default=30)

@@ -14,8 +14,10 @@ CS4248-Project/
 │   └── deberta_base_pointer.yaml    # Training configuration
 ├── data/
 │   ├── train-v1.1.json              # SQuAD 1.1 training data
+│   ├── train-augmented-full.json    # SQuAD 1.1 augmented training data
 │   ├── dev-v1.1.json                # SQuAD 1.1 dev data
-│   ├── processed_dataset/           # Preprocessed training data
+│   ├── processed_train/             # Preprocessed training data (no augmentation)
+│   ├── processed_train_augmented/   # Preprocessed training data (with augmentation)
 │   └── processed_dev/               # Preprocessed validation data
 ├── src/
 │   ├── models/
@@ -76,7 +78,7 @@ Converts SQuAD JSON to tokenized windows with sliding window approach:
 ```bash
 python src/data_processing.py \
   --input_file data/train-v1.1.json \
-  --output_dir data/processed_dataset
+  --output_dir data/processed_train
 ```
 
 ### 3. Model Architecture
@@ -197,7 +199,7 @@ patience: 3
    # Original data
    python src/data_processing.py \
      --input_file data/train-v1.1.json \
-     --output_dir data/processed_dataset
+     --output_dir data/processed_train
    
    # Or augmented data
    python src/data_processing.py \
@@ -218,7 +220,7 @@ patience: 3
 4. **Generate predictions:**
    ```bash
    python src/predict.py \
-     --checkpoint_dir outputs/deberta_large_pointer/best \
+     --checkpoint_dir outputs/model \
      --dev_json data/dev-v1.1.json \
      --output predictions/dev_predictions.json
    ```

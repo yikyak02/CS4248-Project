@@ -1,7 +1,32 @@
 CS4248 Project — Extractive QA with Span‑Aware Proposer
 
+Quick Test (Using our Pre-trained Model)
+- To quickly test the trained model on SQuAD v1.1 dev set:
+  ```bash
+  # Run inference with the trained model 
+  python src/predict.py \
+    --checkpoint_dir outputs/model \
+    --dev_json data/dev-v1.1.json \
+    --output predictions/quick_test.json \
+    --batch_size 16
+  
+  # Evaluate predictions
+  python src/eval_wrap.py \
+    --dev_json data/dev-v1.1.json \
+    --pred_json predictions/quick_test.json \
+    --evaluator_path src/evaluate-v2.0.py
+  
+  # Or use pre-computed predictions
+  python src/eval_wrap.py \
+    --dev_json data/dev-v1.1.json \
+    --pred_json predictions/dev_predictions.json \
+    --evaluator_path src/evaluate-v2.0.py
+  ```
+- The model in `outputs/model` uses a **Pointer head** with DeBERTa-v3-large encoder.
+- Expected performance: ~90% EM, ~95% F1 on SQuAD v1.1 dev set.
+
 Abstract
-- Build an extractive QA model that predicts answer spans from passages on SQuAD v1.1. Improve over the vanilla “independent start/end” baseline via a stronger encoder (DeBERTa‑v3‑small), span‑aware heads (conditional pointer or biaffine), and stable training (linear warmup, gradient clipping, optional label smoothing and EMA). The pipeline is config‑driven, easy to inspect, and robust across CUDA/MPS/CPU.
+- Build an extractive QA model that predicts answer spans from passages on SQuAD v1.1. Improve over the vanilla “independent start/end” baseline via a stronger encoder (DeBERTa‑v3‑large), span‑aware heads (conditional pointer or biaffine), and stable training (linear warmup, gradient clipping, optional label smoothing and EMA). The pipeline is config‑driven, easy to inspect, and robust across CUDA/MPS/CPU.
 
 Approach Overview
 - Encoder: Hugging Face `AutoModel` backbone returns token hidden states `[B, L, d]`.
@@ -119,10 +144,10 @@ Configuration Reference
 
 Quick Start
 - Install: `pip install -r requirements.txt`
-- Preprocess: `python src/data_processing.py --input_file data/train-v1.1.json --output_dir data/processed_dataset`
+- Preprocess: `python src/data_processing.py --input_file data/train-v1.1.json --output_dir data/processed_train`
 - Train: `python src/train.py --config config/deberta_base_pointer.yaml`
-- Predict: `python src/predict.py --checkpoint_dir outputs/deberta_v3_small_pointer_fast/final --dev_json data/dev-v1.1.json --output predictions.json`
-- Evaluate: `python src/eval_wrap.py --dev_json data/dev-v1.1.json --pred_json predictions.json --evaluator_path src/evaluate-v2.0.py`
+- Predict: `python src/predict.py --checkpoint_dir outputs/model --dev_json data/dev-v1.1.json --output predictions.json`
+- Evaluate: `python src/eval_wrap.py --dev_json data/dev-v1.1.json --pred_json predictions/dev_predictions.json --evaluator_path src/evaluate-v2.0.py`
 
 Data Augmentation via Back-Translation
 - Purpose: Improve model robustness by exposing it to paraphrased questions and contexts through back-translation using Helsinki-NLP MarianMT models.
