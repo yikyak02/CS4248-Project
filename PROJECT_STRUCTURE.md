@@ -235,7 +235,7 @@ patience: 3
 ### Pointer Head
 - **Advantages**: Simpler, faster inference
 - **Architecture**: Independent start/end with conditioning
-- **Expected Performance**: 80-84% EM, 87-90% F1
+- **Expected Performance**: 88-90% EM, 92-95% F1
 
 ### Biaffine Head
 - **Advantages**: Joint span modeling, better boundary detection
