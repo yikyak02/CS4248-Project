@@ -39,7 +39,7 @@ doc_stride: 128                           # Stride for sliding windows (overlap 
 
 epochs: 3
 train_batch_size: 8
-grad_accum_steps: 4                       # Effective batch size = train_batch_size * grad_accum_steps = 32
+grad_accum_steps: 4                       # Effective batch size = 32
 
 # Optimizer settings
 lr: 3e-5                                  # Learning rate (Adam)
@@ -52,14 +52,14 @@ dropout: 0.1                              # Dropout probability in encoder and h
 label_smoothing: 0.0                      # Label smoothing factor (0.0 = no smoothing)
 
 # Learning rate schedule
-scheduler: linear                         # 'linear' or 'cosine'
+scheduler: linear                         
 
 # Mixed precision training (faster on GPU)
-amp: true                                 # Automatic mixed precision (only on CUDA)
+amp: true                                 # Automatic mixed precision 
 
 # Exponential moving average (optional)
-ema: false                                # Use EMA of model weights
-ema_decay: 0.999                          # EMA decay factor
+ema: true                                # Use EMA of model weights
+ema_decay: 0.999                         # EMA decay factor
 
 # ==============================================================================
 # Early Stopping & Validation

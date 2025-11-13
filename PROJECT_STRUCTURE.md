@@ -28,25 +28,48 @@ CS4248-Project/
 │   │   ├── schedule.py              # Learning rate schedulers
 │   │   ├── seed.py                  # Random seed utilities
 │   │   └── smoothing.py             # Label smoothing
+│   ├── augment_backtranslation.py   # Data augmentation via back-translation
 │   ├── data_processing.py           # Preprocess SQuAD data
 │   ├── data_wrappers.py             # PyTorch Dataset classes
-│   ├── decode.py                    # Decoding logic for pointer head
+│   ├── decode.py                    # Decoding logic for span extraction
 │   ├── train.py                     # Training script
 │   ├── predict.py                   # Inference script
 │   ├── evaluate-v2.0.py             # Official SQuAD evaluation
-│   └── eval_wrap.py                 # Evaluation wrapper
+│   ├── eval_wrap.py                 # Evaluation wrapper
+│   └── inspect_processed.py         # Utility to inspect processed datasets
 ├── outputs/                         # Trained model checkpoints
 └── predictions/                     # Prediction outputs
 ```
 
 ## Key Components
 
-### 1. Data Processing (`data_processing.py`)
+### 1. Data Augmentation (`augment_backtranslation.py`)
+
+Generates paraphrased training examples via back-translation:
+- Uses Helsinki-NLP MarianMT models for translation
+- Supports multiple pivot languages: de, fr, es, ru, zh
+- Batched translation for efficiency (12-24x speedup)
+- Automatic answer alignment and quality filtering
+- Preserves SQuAD JSON format for downstream processing
+
+**Usage:**
+```bash
+python src/augment_backtranslation.py \
+  --input data/train-v1.1.json \
+  --output data/train-augmented-full.json \
+  --languages de fr es ru zh \
+  --max-examples 87599 \
+  --batch-size 64 \
+  --device cuda
+```
+
+### 2. Data Processing (`data_processing.py`)
 
 Converts SQuAD JSON to tokenized windows with sliding window approach:
 - Tokenizes question + context pairs
 - Creates overlapping windows for long contexts
 - Aligns answer spans to token positions
+- Handles edge cases with robust error handling
 - Saves preprocessed data in HuggingFace Datasets format
 
 **Usage:**
@@ -56,7 +79,7 @@ python src/data_processing.py \
   --output_dir data/processed_dataset
 ```
 
-### 2. Model Architecture
+### 3. Model Architecture
 
 #### Encoder (`encoders.py`)
 - Wrapper around HuggingFace DeBERTa-v3-large
@@ -81,7 +104,7 @@ python src/data_processing.py \
 - Implements loss computation for both head types
 - Handles label smoothing and ignore indices
 
-### 3. Training (`train.py`)
+### 4. Training (`train.py`)
 
 Features:
 - Mixed precision training (AMP)
@@ -96,7 +119,7 @@ Features:
 python src/train.py config/deberta_base_pointer.yaml
 ```
 
-### 4. Prediction (`predict.py`)
+### 5. Prediction (`predict.py`)
 
 Features:
 - Sliding window inference for long contexts
@@ -115,7 +138,7 @@ python src/predict.py \
   --doc_stride 128
 ```
 
-### 5. Evaluation (`evaluate-v2.0.py`)
+### 6. Evaluation (`evaluate-v2.0.py`)
 
 Official SQuAD evaluation script:
 - Computes Exact Match (EM) and F1 scores
@@ -158,23 +181,41 @@ patience: 3
 
 ## Training Pipeline
 
-1. **Preprocess data:**
+1. **[Optional] Augment training data with back-translation:**
    ```bash
+   python src/augment_backtranslation.py \
+     --input data/train-v1.1.json \
+     --output data/train-augmented-full.json \
+     --languages de fr es ru zh \
+     --max-examples 87599 \
+     --batch-size 64 \
+     --device cuda
+   ```
+
+2. **Preprocess data:**
+   ```bash
+   # Original data
    python src/data_processing.py \
      --input_file data/train-v1.1.json \
      --output_dir data/processed_dataset
    
+   # Or augmented data
+   python src/data_processing.py \
+     --input_file data/train-augmented-full.json \
+     --output_dir data/processed_train_augmented
+   
+   # Dev data
    python src/data_processing.py \
      --input_file data/dev-v1.1.json \
      --output_dir data/processed_dev
    ```
 
-2. **Train model:**
+3. **Train model:**
    ```bash
    python src/train.py config/deberta_base_pointer.yaml
    ```
 
-3. **Generate predictions:**
+4. **Generate predictions:**
    ```bash
    python src/predict.py \
      --checkpoint_dir outputs/deberta_large_pointer/best \
@@ -182,7 +223,7 @@ patience: 3
      --output predictions/dev_predictions.json
    ```
 
-4. **Evaluate:**
+5. **Evaluate:**
    ```bash
    python src/evaluate-v2.0.py \
      data/dev-v1.1.json \
